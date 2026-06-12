@@ -23,6 +23,24 @@ class VIEW3D_PT_MaxTexturizer(bpy.types.Panel):
         box_prompt.prop(scene, "max_texturizer_prompt", text="Prompt")
         box_prompt.prop(scene, "max_texturizer_neg_prompt", text="Negativo")
 
+        # 2.5 LLM Orchestration Section
+        active_obj = context.active_object
+        if active_obj and active_obj.type == 'MESH':
+            box_slots = layout.box()
+            box_slots.label(text="Orquestração PBR & Slots (Ollama)", icon='SOLO_ON')
+            
+            # List slots
+            for index, slot in enumerate(active_obj.material_slots):
+                row = box_slots.row(align=True)
+                row.label(text=f"{index}: {slot.name}", icon='SHADING_TEXTURE')
+                if slot.material:
+                    row.label(text=f"[{slot.material.name}]")
+                else:
+                    row.label(text="[Sem Material]", icon='ERROR')
+                    
+            box_slots.separator()
+            box_slots.operator("object.max_texturizer_orchestrate", text="Orquestrar com LLM", icon='CONSOLE')
+
         # 3. Parameters Selection
         box_params = layout.box()
         box_params.label(text="Configurações da Geração", icon='PREFERENCES')

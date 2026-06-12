@@ -15,11 +15,29 @@ class MaxTexturizerPreferences(bpy.types.AddonPreferences):
         default=False,
     )
 
+    llm_url: bpy.props.StringProperty(
+        name="Ollama/LM Studio URL",
+        description="Endereço da API do LLM local",
+        default="http://localhost:11434",
+    )
+
+    llm_model: bpy.props.StringProperty(
+        name="Modelo do LLM",
+        description="Nome do modelo local instalado (ex: llama3, qwen2.5, mistral)",
+        default="llama3",
+    )
+
     def draw(self, context):
         layout = self.layout
         column = layout.column(align=True)
+        column.label(text="Configurações do Servidor de Imagem/3D:")
         column.prop(self, "server_url")
         column.prop(self, "force_mock")
+        
+        column.separator()
+        column.label(text="Configurações do LLM Local:")
+        column.prop(self, "llm_url")
+        column.prop(self, "llm_model")
 
 def register():
     bpy.utils.register_class(MaxTexturizerPreferences)

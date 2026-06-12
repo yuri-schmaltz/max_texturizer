@@ -3,9 +3,10 @@ import io
 import zipfile
 import logging
 import uuid
-from typing import Optional
+from typing import Optional, List
 from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException
 from fastapi.responses import StreamingResponse, Response
+from pydantic import BaseModel
 from PIL import Image, ImageDraw, ImageFont
 
 # Set up logging
@@ -15,12 +16,19 @@ logger = logging.getLogger("max-texturizer-backend")
 # Import our custom modules
 from model_loader import model_loader
 from mock_generator import apply_mock_texture_to_mesh, generate_procedural_textures
+from llm_orchestrator import llm_orchestrator
 
 app = FastAPI(
     title="Max Texturizer API",
     description="Backend for automatic texturing of 3D meshes using Hunyuan3D-Paint",
-    version="1.0.1"
+    version="1.1.0"
 )
+
+class OrchestrateRequest(BaseModel):
+    prompt: str
+    slots: List[str]
+    model_url: Optional[str] = "http://localhost:11434"
+    model_name: Optional[str] = "llama3"
 
 # Initialize models on startup
 @app.on_event("startup")
@@ -40,6 +48,23 @@ def health_check():
         "device": model_loader.device,
         "mode": "Mock Mode (Procedural)" if model_loader.is_mock else "AI Model Mode (Hunyuan3D-Paint)"
     }
+
+@app.post("/orchestrate")
+def orchestrate_materials(req: OrchestrateRequest):
+    """
+    Orchestrates texture parameters for a list of Blender material slots using a local LLM.
+    """
+    try:
+        result = llm_orchestrator.orchestrate(
+            prompt=req.prompt,
+            slots=req.slots,
+            model_url=req.model_url,
+            model_name=req.model_name
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Orchestration failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/generate-ref-image")
 def generate_ref_image(
