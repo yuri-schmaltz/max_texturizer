@@ -485,9 +485,14 @@ class OBJECT_OT_MaxTexturizerOrchestrate(bpy.types.Operator):
                     
                     # Hex to RGBA (Blender sRGB Gamma Correction)
                     hex_clean = hex_color.lstrip('#')
-                    r = int(hex_clean[0:2], 16) / 255.0
-                    g = int(hex_clean[2:4], 16) / 255.0
-                    b = int(hex_clean[4:6], 16) / 255.0
+                    if len(hex_clean) != 6:
+                        hex_clean = "88888b"
+                    try:
+                        r = int(hex_clean[0:2], 16) / 255.0
+                        g = int(hex_clean[2:4], 16) / 255.0
+                        b = int(hex_clean[4:6], 16) / 255.0
+                    except ValueError:
+                        r, g, b = 0.5, 0.5, 0.5
                     rgba = (r**2.2, g**2.2, b**2.2, 1.0)
                     
                     node_principled.inputs['Base Color'].default_value = rgba
