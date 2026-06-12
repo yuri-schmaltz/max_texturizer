@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+ENV/
+*.so
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Blender temporary/backup files
+*.blend1
+*.blend2
+*~
+
+# Temporary cache files
+max_texturizer_preview.png
+unzip_*/
+export_*/
+temp_cache/
