@@ -19,7 +19,7 @@ from mock_generator import apply_mock_texture_to_mesh, generate_procedural_textu
 app = FastAPI(
     title="Max Texturizer API",
     description="Backend for automatic texturing of 3D meshes using Hunyuan3D-Paint",
-    version="1.0.0"
+    version="1.0.1"
 )
 
 # Initialize models on startup
