@@ -24,3 +24,12 @@ max_texturizer_preview.png
 unzip_*/
 export_*/
 temp_cache/
+
+# Build artifacts
+max_texturizer.zip
+dist/
+build/
+
+# Third-party add-on bundles (reference only — install separately if needed)
+fluent_materializer_*/
+
