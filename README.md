@@ -1,5 +1,10 @@
 # Max Texturizer IA 🎨🤖
 
+[![Latest Release](https://img.shields.io/github/v/release/yuri-schmaltz/my-texturizer?include_prereleases&style=flat-square)](https://github.com/yuri-schmaltz/my-texturizer/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
+[![Blender 3.3+](https://img.shields.io/badge/Blender-3.3%2B-orange.svg?style=flat-square)](https://www.blender.org/)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-blue.svg?style=flat-square)](https://www.python.org/)
+
 **Max Texturizer** é um ecossistema para automatizar a geração e aplicação de texturas 3D realistas em malhas (meshes) no **Blender** usando Inteligência Artificial (**Hunyuan3D-Paint**). O sistema é dividido em duas partes:
 
 1. **Backend FastAPI** — servidor local que gerencia modelos de IA, gera imagens-guia e executa a texturização. Suporta **Modo Mock** (texturas procedurais instantâneas, sem GPU) e **Modo Real** (Hunyuan3D-Paint, requer GPU NVIDIA + CUDA).
