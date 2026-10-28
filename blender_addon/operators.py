@@ -7,9 +7,11 @@ import os
 import zipfile
 import tempfile
 from .backend_service import service
+from .llm_models import catalog
 
 _auto_start_done = False
 _last_backend_state = None
+_last_llm_url = None
 
 def get_preferences():
     return bpy.context.preferences.addons[__package__].preferences
@@ -22,7 +24,7 @@ def start_backend():
 
 
 def backend_timer():
-    global _auto_start_done, _last_backend_state
+    global _auto_start_done, _last_backend_state, _last_llm_url
     try:
         prefs = get_preferences()
     except KeyError:
@@ -32,7 +34,13 @@ def backend_timer():
         if prefs.auto_start_backend:
             start_backend()
     state = service.snapshot()
-    current = (state["status"], state["message"])
+    llm_url = prefs.llm_url.strip().rstrip('/')
+    if llm_url != _last_llm_url:
+        _last_llm_url = llm_url
+        if catalog.snapshot()['url'] != llm_url:
+            catalog.refresh(llm_url)
+    models = catalog.snapshot()
+    current = (state["status"], state["message"], models['url'], models['status'], models['message'], models['models'])
     if current != _last_backend_state:
         _last_backend_state = current
         for window in bpy.context.window_manager.windows:
@@ -50,6 +58,37 @@ def backend_ready(operator):
         operator.report({'INFO'}, "Preparando backend. Aguarde o painel indicar Conectado e tente novamente.")
         return False
     return True
+
+
+def refresh_material_view(context, objects):
+    """Invalidate changed shading data and show textures in every 3D viewport."""
+    images = set()
+    for obj in objects:
+        if obj.type != 'MESH':
+            continue
+        for material in obj.data.materials:
+            if material is None:
+                continue
+            if material.use_nodes and material.node_tree:
+                for node in material.node_tree.nodes:
+                    if node.type == 'TEX_IMAGE' and node.image:
+                        images.add(node.image)
+                material.node_tree.update_tag()
+            material.update_tag()
+        obj.data.update()
+        obj.update_tag()
+    for image in images:
+        # Packed images must be updated in memory, never reloaded from deleted temp files.
+        image.update()
+    context.view_layer.update()
+    for window in context.window_manager.windows:
+        for area in window.screen.areas:
+            if area.type == 'VIEW_3D':
+                for space in area.spaces:
+                    if space.type == 'VIEW_3D' and space.shading.type in {'SOLID', 'WIREFRAME'}:
+                        space.shading.type = 'MATERIAL'
+            if area.type in {'VIEW_3D', 'IMAGE_EDITOR', 'NODE_EDITOR'}:
+                area.tag_redraw()
 
 def show_message_box(message="", title="Max Texturizer", icon='INFO'):
     def draw(self, context):
@@ -94,6 +133,16 @@ def build_multipart_body(fields, files):
             body_bytes += part + b'\r\n'
             
     return body_bytes, f'multipart/form-data; boundary={boundary}'
+
+
+class OBJECT_OT_MaxTexturizerRefreshModels(bpy.types.Operator):
+    bl_idname = "object.max_texturizer_refresh_models"
+    bl_label = "Atualizar modelos"
+    bl_description = "Busca os modelos disponíveis no Ollama ou LM Studio sem bloquear o Blender"
+
+    def execute(self, context):
+        catalog.refresh(get_preferences().llm_url)
+        return {'FINISHED'}
 
 
 class OBJECT_OT_MaxTexturizerStartBackend(bpy.types.Operator):
@@ -437,6 +486,8 @@ class OBJECT_OT_MaxTexturizerGenerate(bpy.types.Operator):
                 # Clean up temporary unzip directory
                 import shutil
                 shutil.rmtree(unzip_dir)
+
+                refresh_material_view(context, imported_objs if scene.max_texturizer_mode == 'IMPORT_GLB' else [active_obj])
                 
         except Exception as e:
             # Restore selection
@@ -481,7 +532,7 @@ class OBJECT_OT_MaxTexturizerOrchestrate(bpy.types.Operator):
         payload = {
             "prompt": prompt,
             "slots": slots,
-            "model_url": prefs.llm_url,
+            "model_url": prefs.llm_url.strip().rstrip('/').removesuffix('/v1'),
             "model_name": prefs.llm_model
         }
         
@@ -728,6 +779,7 @@ class OBJECT_OT_MaxTexturizerOrchestrate(bpy.types.Operator):
                             links.new(mix_dirt.outputs[0], node_principled.inputs['Base Color'])
                             
                 # Finished slots orchestration loop
+                refresh_material_view(context, [active_obj])
                 show_message_box(
                     message="Orquestração concluída! Materiais PBR e shaders procedimentais configurados com sucesso.",
                     title="Orquestração Concluída",
@@ -741,9 +793,11 @@ class OBJECT_OT_MaxTexturizerOrchestrate(bpy.types.Operator):
 
 
 def register():
-    global _auto_start_done, _last_backend_state
+    global _auto_start_done, _last_backend_state, _last_llm_url
     _auto_start_done = False
     _last_backend_state = None
+    _last_llm_url = None
+    bpy.utils.register_class(OBJECT_OT_MaxTexturizerRefreshModels)
     bpy.utils.register_class(OBJECT_OT_MaxTexturizerStartBackend)
     bpy.utils.register_class(OBJECT_OT_MaxTexturizerOpenBackendLog)
     bpy.utils.register_class(OBJECT_OT_MaxTexturizerCheckConnection)
@@ -756,6 +810,7 @@ def register():
 def unregister():
     if bpy.app.timers.is_registered(backend_timer):
         bpy.app.timers.unregister(backend_timer)
+    bpy.utils.unregister_class(OBJECT_OT_MaxTexturizerRefreshModels)
     bpy.utils.unregister_class(OBJECT_OT_MaxTexturizerStartBackend)
     bpy.utils.unregister_class(OBJECT_OT_MaxTexturizerOpenBackendLog)
     bpy.utils.unregister_class(OBJECT_OT_MaxTexturizerCheckConnection)

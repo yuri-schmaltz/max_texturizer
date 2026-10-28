@@ -114,7 +114,7 @@ Abra o painel lateral do Blender com **N** na Viewport 3D e selecione a aba **Ma
    - **Mapear UVs Existentes** *(padrão)* — mantém sua geometria e aplica as texturas geradas diretamente nas UVs do objeto.
    - **Substituir por Malha .glb** — substitui o objeto por uma nova malha importada com UVs otimizadas pela IA.
 4. **Visualizar Imagem de Referência** — gera uma imagem preliminar para você inspecionar antes de texturizar. A imagem aparece no Editor de Imagens do Blender como `MaxTexturizer_Preview`.
-5. **Gerar Textura** — exporta o mesh, envia para o backend e aplica o resultado automaticamente.
+5. **Gerar Textura** — exporta o mesh, envia para o backend e aplica o resultado automaticamente. Após aplicar ou atualizar a textura, o add-on atualiza as imagens, os materiais e a viewport. Visualizações em Sólido/Aramado passam para Material Preview; Rendered permanece em Rendered.
 
 ### B. Orquestração PBR com LLM (avançado)
 
@@ -123,9 +123,12 @@ Para configurar shaders procedurais (edge wear, scratches, dirt) nos slots de ma
 1. Selecione um objeto com **múltiplos slots de material**
 2. Preencha o **Prompt** descrevendo o objeto (ex: `espada medieval desgastada, lâmina de aço, cabo de couro`)
 3. Certifique-se de que o Ollama está rodando (padrão: `http://localhost:11434`, modelo: `llama3`)
-4. Clique em **Orquestrar com LLM**
+4. Nas preferências do add-on, confira a URL do LLM e escolha o **Modelo do LLM** na lista de modelos disponíveis. A busca ocorre ao abrir o Blender e ao alterar a URL; use o ícone de atualização para buscar novamente. O nome exato selecionado é enviado ao orquestrador.
+5. Clique em **Orquestrar com LLM**
 
 O backend envia a descrição + lista de slots para o LLM, que retorna propriedades PBR e flags de efeitos procedurais. O add-on monta automaticamente o node tree no Blender para cada slot.
+
+A lista consulta `/api/tags` no Ollama e `/v1/models` em servidores compatíveis, como LM Studio. URLs terminadas em `/v1` também são aceitas. Se precisar digitar um identificador, ative **Informar modelo manualmente**. Uma seleção anterior é preservada e marcada como **atual; não listado** quando não aparece no servidor; escolha um modelo listado antes de orquestrar.
 
 > **Fallback offline:** se o LLM estiver indisponível, o backend usa um parser de keywords que reconhece materiais comuns (metal, madeira, couro, etc.).
 
