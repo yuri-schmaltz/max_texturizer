@@ -33,7 +33,11 @@ class VIEW3D_PT_MaxTexturizer(bpy.types.Panel):
         box_prompt = layout.box()
         box_prompt.label(text="Instruções de Textura", icon='TEXT')
         box_prompt.prop(scene, "max_texturizer_prompt", text="Prompt")
-        box_prompt.prop(scene, "max_texturizer_neg_prompt", text="Negativo")
+        box_prompt.prop(scene, "max_texturizer_method")
+        row = box_prompt.row(align=True)
+        row.prop(scene, "max_texturizer_reference_image", text="Referência")
+        row.operator("object.max_texturizer_load_reference", text="", icon='FILE_FOLDER')
+        box_prompt.label(text="Xadrez/bolinhas: use Automática ou Padrão exato.")
 
         # 2.5 LLM Orchestration Section
         active_obj = context.active_object
@@ -57,8 +61,7 @@ class VIEW3D_PT_MaxTexturizer(bpy.types.Panel):
         box_params = layout.box()
         box_params.label(text="Configurações da Geração", icon='PREFERENCES')
         box_params.prop(scene, "max_texturizer_resolution", text="Resolução")
-        box_params.prop(scene, "max_texturizer_steps", text="Passos IA")
-        box_params.prop(scene, "max_texturizer_guidance", text="Guidance Scale")
+        box_params.label(text="A IA usa a amostragem própria do modelo.")
 
         # 4. Import / Apply configuration
         box_integ = layout.box()

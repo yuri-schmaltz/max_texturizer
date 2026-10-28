@@ -1,11 +1,13 @@
 import bpy
 import urllib.request
 import urllib.parse
+import urllib.error
 import json
 import uuid
 import os
 import zipfile
 import tempfile
+from mathutils import Matrix
 from .backend_service import service
 from .llm_models import catalog
 
@@ -94,6 +96,68 @@ def show_message_box(message="", title="Max Texturizer", icon='INFO'):
     def draw(self, context):
         self.layout.label(text=message)
     bpy.context.window_manager.popup_menu(draw, title=title, icon=icon)
+
+
+def server_error(error):
+    if isinstance(error, urllib.error.HTTPError):
+        try:
+            return json.loads(error.read().decode()).get('detail', str(error))
+        except (ValueError, OSError):
+            pass
+    return str(error)
+
+
+def reference_for_scene(scene):
+    image = scene.max_texturizer_reference_image
+    if image and image.get('_texturizer_generated', False):
+        if image.get('_texturizer_prompt') != scene.max_texturizer_prompt or image.get('_texturizer_method') != scene.max_texturizer_method:
+            return None
+    return image
+
+
+def reference_bytes(image):
+    if image.packed_file and not image.is_dirty:
+        return bytes(image.packed_file.data)
+    path = bpy.path.abspath(image.filepath)
+    if os.path.isfile(path) and not image.is_dirty:
+        with open(path, 'rb') as source:
+            return source.read()
+    # Export generated/edited buffers without changing the user's image path.
+    copy = image.copy()
+    path = os.path.join(tempfile.gettempdir(), 'reference_' + uuid.uuid4().hex + '.png')
+    try:
+        copy.pixels[:] = image.pixels[:]
+        copy.filepath_raw = path
+        copy.file_format = 'PNG'
+        copy.save()
+        with open(path, 'rb') as source:
+            return source.read()
+    finally:
+        bpy.data.images.remove(copy)
+        if os.path.exists(path):
+            os.remove(path)
+
+
+class OBJECT_OT_MaxTexturizerLoadReference(bpy.types.Operator):
+    bl_idname = "object.max_texturizer_load_reference"
+    bl_label = "Escolher imagem de referência"
+    filepath: bpy.props.StringProperty(subtype='FILE_PATH')
+    filter_glob: bpy.props.StringProperty(default='*.png;*.jpg;*.jpeg;*.webp', options={'HIDDEN'})
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        try:
+            image = bpy.data.images.load(self.filepath, check_existing=True)
+            image.pack()
+            image['_texturizer_generated'] = False
+            context.scene.max_texturizer_reference_image = image
+        except Exception as error:
+            self.report({'ERROR'}, str(error))
+            return {'CANCELLED'}
+        return {'FINISHED'}
 
 def build_multipart_body(fields, files):
     """
@@ -193,6 +257,15 @@ class OBJECT_OT_MaxTexturizerPreview(bpy.types.Operator):
             return {'CANCELLED'}
         scene = context.scene
         prompt = scene.max_texturizer_prompt
+        selected_reference = reference_for_scene(scene)
+        if selected_reference and not selected_reference.get('_texturizer_generated', False):
+            for window in context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == 'IMAGE_EDITOR':
+                        area.spaces.active.image = selected_reference
+                        area.tag_redraw()
+            self.report({'INFO'}, "A imagem selecionada será usada como referência na geração.")
+            return {'FINISHED'}
         
         if not prompt.strip():
             show_message_box("Por favor, insira um prompt de texto primeiro.", "Prompt Vazio", 'WARNING')
@@ -201,7 +274,9 @@ class OBJECT_OT_MaxTexturizerPreview(bpy.types.Operator):
         prefs = get_preferences()
         query_params = urllib.parse.urlencode({
             "prompt": prompt,
-            "force_mock": prefs.force_mock
+            "force_mock": prefs.force_mock,
+            "method": scene.max_texturizer_method,
+            "resolution": scene.max_texturizer_resolution,
         })
         url = f"{prefs.server_url.rstrip('/')}/generate-ref-image?{query_params}"
         
@@ -211,6 +286,7 @@ class OBJECT_OT_MaxTexturizerPreview(bpy.types.Operator):
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=25) as response:
                 img_data = response.read()
+                ref_source = response.headers.get('X-Reference-Source', 'remote')
                 
                 # Save to temp file
                 temp_dir = tempfile.gettempdir()
@@ -221,6 +297,8 @@ class OBJECT_OT_MaxTexturizerPreview(bpy.types.Operator):
                 # Load or reload image in Blender
                 img_name = "MaxTexturizer_Preview"
                 if img_name in bpy.data.images:
+                    if bpy.data.images[img_name].packed_file:
+                        bpy.data.images[img_name].unpack(method='REMOVE')
                     bpy.data.images[img_name].filepath = img_path
                     bpy.data.images[img_name].reload()
                     img = bpy.data.images[img_name]
@@ -228,6 +306,12 @@ class OBJECT_OT_MaxTexturizerPreview(bpy.types.Operator):
                     img = bpy.data.images.load(img_path)
                     img.name = img_name
                     
+                img.pack()
+                img['_texturizer_generated'] = True
+                img['_texturizer_prompt'] = prompt
+                img['_texturizer_method'] = scene.max_texturizer_method
+                img['_texturizer_source'] = ref_source
+                scene.max_texturizer_reference_image = img
                 # Open image in any open Image Editor to show preview
                 found_editor = False
                 for area in context.screen.areas:
@@ -248,7 +332,7 @@ class OBJECT_OT_MaxTexturizerPreview(bpy.types.Operator):
                     )
                     
         except Exception as e:
-            show_message_box(f"Erro ao gerar imagem de referência: {e}", "Falha no Preview", 'ERROR')
+            show_message_box(f"Erro ao gerar imagem de referência: {server_error(e)}", "Falha no Preview", 'ERROR')
             
         return {'FINISHED'}
 
@@ -277,10 +361,8 @@ class OBJECT_OT_MaxTexturizerGenerate(bpy.types.Operator):
         prefs = get_preferences()
         
         # Save positions to restore later
-        original_loc = active_obj.location.copy()
-        original_rot = active_obj.rotation_euler.copy()
-        original_scale = active_obj.scale.copy()
         original_name = active_obj.name
+        original_matrix = active_obj.matrix_world.copy()
         
         # 1. Export active mesh to temporary GLB file
         temp_dir = tempfile.gettempdir()
@@ -295,6 +377,9 @@ class OBJECT_OT_MaxTexturizerGenerate(bpy.types.Operator):
         
         # Call GLTF exporter
         try:
+            # The server works in mesh coordinates; apply the object transform once on import.
+            active_obj.matrix_world = Matrix.Identity(4)
+            context.view_layer.update()
             bpy.ops.export_scene.gltf(
                 filepath=export_path,
                 export_format='GLB',
@@ -306,6 +391,9 @@ class OBJECT_OT_MaxTexturizerGenerate(bpy.types.Operator):
             active_obj.select_set(True)
             show_message_box(f"Falha ao exportar a malha do Blender: {e}", "Erro no Export", 'ERROR')
             return {'CANCELLED'}
+        finally:
+            active_obj.matrix_world = original_matrix
+            context.view_layer.update()
 
         # Read exported file bytes
         try:
@@ -328,13 +416,23 @@ class OBJECT_OT_MaxTexturizerGenerate(bpy.types.Operator):
             "steps": scene.max_texturizer_steps,
             "guidance_scale": scene.max_texturizer_guidance,
             "negative_prompt": scene.max_texturizer_neg_prompt,
-            "force_mock": prefs.force_mock
+            "force_mock": prefs.force_mock,
+            "method": scene.max_texturizer_method,
+            "preserve_uv": scene.max_texturizer_mode == 'APPLY_MATERIAL',
         }
         
         files = {
             "file": (f"{original_name}.glb", glb_bytes)
         }
         
+        reference = reference_for_scene(scene)
+        if reference:
+            try:
+                files['reference'] = ('reference.png', reference_bytes(reference))
+                fields['reference_source'] = reference.get('_texturizer_source', 'uploaded') if reference.get('_texturizer_generated', False) else 'uploaded'
+            except Exception as error:
+                show_message_box(str(error), "Imagem de referência inválida", 'ERROR')
+                return {'CANCELLED'}
         body, content_type = build_multipart_body(fields, files)
         
         try:
@@ -355,6 +453,15 @@ class OBJECT_OT_MaxTexturizerGenerate(bpy.types.Operator):
                 with zipfile.ZipFile(zip_path, 'r') as zip_ref:
                     zip_ref.extractall(unzip_dir)
                 
+                info_path = os.path.join(unzip_dir, 'generation.json')
+                generation = {}
+                if os.path.isfile(info_path):
+                    with open(info_path) as info:
+                        generation = json.load(info)
+                if not generation:
+                    raise RuntimeError('O backend está desatualizado. Reinicie o servidor para gerar texturas com UVs e método corretos.')
+                if scene.max_texturizer_mode == 'APPLY_MATERIAL' and generation.get('engine') == 'hunyuan3d' and not generation.get('preserve_uv'):
+                    raise RuntimeError('O servidor retornou UVs diferentes. Atualize/reinicie o backend antes de aplicar a textura.')
                 mesh_glb_path = os.path.join(unzip_dir, "mesh.glb")
                 albedo_path = os.path.join(unzip_dir, "albedo.png")
                 roughness_path = os.path.join(unzip_dir, "roughness.png")
@@ -378,9 +485,7 @@ class OBJECT_OT_MaxTexturizerGenerate(bpy.types.Operator):
                         new_obj.name = f"{original_name}_Texturizado"
                         
                         # Apply original transformations
-                        new_obj.location = original_loc
-                        new_obj.rotation_euler = original_rot
-                        new_obj.scale = original_scale
+                        new_obj.matrix_world = original_matrix
                         
                         # Hide original object
                         active_obj.hide_viewport = True
@@ -488,11 +593,13 @@ class OBJECT_OT_MaxTexturizerGenerate(bpy.types.Operator):
                 shutil.rmtree(unzip_dir)
 
                 refresh_material_view(context, imported_objs if scene.max_texturizer_mode == 'IMPORT_GLB' else [active_obj])
+                engine = generation.get('engine', 'desconhecido')
+                self.report({'INFO'}, 'Textura aplicada — ' + {'local-pattern': 'padrão local exato', 'hunyuan3d': 'Hunyuan3D', 'mock': 'MOCK de demonstração'}.get(engine, engine))
                 
         except Exception as e:
             # Restore selection
             active_obj.select_set(True)
-            show_message_box(f"Falha na texturização automática: {e}", "Erro no Processamento", 'ERROR')
+            show_message_box(f"Falha na texturização automática: {server_error(e)}", "Erro no Processamento", 'ERROR')
             
         return {'FINISHED'}
 
@@ -571,15 +678,18 @@ class OBJECT_OT_MaxTexturizerOrchestrate(bpy.types.Operator):
                     mat.use_nodes = True
                     nodes = mat.node_tree.nodes
                     links = mat.node_tree.links
-                    nodes.clear()
-                    
-                    # 1. Output and BSDF
-                    node_output = nodes.new(type='ShaderNodeOutputMaterial')
+                    # Keep existing albedo/normal/roughness image links.
+                    node_output = next((n for n in nodes if n.type == 'OUTPUT_MATERIAL' and n.is_active_output), None)
+                    if node_output is None:
+                        node_output = nodes.new(type='ShaderNodeOutputMaterial')
                     node_output.location = (600, 0)
                     
-                    node_principled = nodes.new(type='ShaderNodeBsdfPrincipled')
+                    node_principled = next((n for n in nodes if n.type == 'BSDF_PRINCIPLED'), None)
+                    if node_principled is None:
+                        node_principled = nodes.new(type='ShaderNodeBsdfPrincipled')
                     node_principled.location = (200, 0)
-                    links.new(node_principled.outputs['BSDF'], node_output.inputs['Surface'])
+                    if not node_output.inputs['Surface'].is_linked:
+                        links.new(node_principled.outputs['BSDF'], node_output.inputs['Surface'])
                     
                     # 2. Set PBR properties
                     hex_color = pbr.get("base_color", "#88888b")
@@ -797,6 +907,7 @@ def register():
     _auto_start_done = False
     _last_backend_state = None
     _last_llm_url = None
+    bpy.utils.register_class(OBJECT_OT_MaxTexturizerLoadReference)
     bpy.utils.register_class(OBJECT_OT_MaxTexturizerRefreshModels)
     bpy.utils.register_class(OBJECT_OT_MaxTexturizerStartBackend)
     bpy.utils.register_class(OBJECT_OT_MaxTexturizerOpenBackendLog)
@@ -810,6 +921,7 @@ def register():
 def unregister():
     if bpy.app.timers.is_registered(backend_timer):
         bpy.app.timers.unregister(backend_timer)
+    bpy.utils.unregister_class(OBJECT_OT_MaxTexturizerLoadReference)
     bpy.utils.unregister_class(OBJECT_OT_MaxTexturizerRefreshModels)
     bpy.utils.unregister_class(OBJECT_OT_MaxTexturizerStartBackend)
     bpy.utils.unregister_class(OBJECT_OT_MaxTexturizerOpenBackendLog)

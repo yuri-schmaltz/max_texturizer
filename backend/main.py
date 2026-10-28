@@ -3,6 +3,7 @@ import io
 import zipfile
 import logging
 import uuid
+import json
 from contextlib import asynccontextmanager
 from typing import Optional, List
 from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException
@@ -17,6 +18,8 @@ logger = logging.getLogger("max-texturizer-backend")
 # Import our custom modules
 from model_loader import model_loader
 from mock_generator import apply_mock_texture_to_mesh, generate_procedural_textures
+from reference_images import reference_image, pattern_kind
+from texture_utils import apply_pattern, extract_albedo, neutral_maps
 from llm_orchestrator import llm_orchestrator
 
 @asynccontextmanager
@@ -30,7 +33,7 @@ async def lifespan(app):
 app = FastAPI(
     title="Max Texturizer API",
     description="Backend for automatic texturing of 3D meshes using Hunyuan3D-Paint",
-    version="1.1.0",
+    version="1.4.0",
     lifespan=lifespan,
 )
 
@@ -50,6 +53,7 @@ def health_check():
         "is_mock": model_loader.is_mock,
         "device": model_loader.device,
         "load_error": model_loader.load_error,
+        "texture_api_version": 2,
         "mode": "Mock Mode (Procedural)" if model_loader.is_mock else "AI Model Mode (Hunyuan3D-Paint)"
     }
 
@@ -71,80 +75,35 @@ def orchestrate_materials(req: OrchestrateRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/generate-ref-image")
-def generate_ref_image(
-    prompt: str = Query(..., description="Prompt to generate image from"),
-    force_mock: bool = Query(False, description="Force generator to output mock image")
-):
-    """
-    Generates a reference image from a text prompt.
-    If in mock mode or forced, generates a beautiful gradient image using PIL with text.
-    """
-    logger.info(f"Generating reference image for prompt: '{prompt}'")
-    
-    # Check if we should generate a mock reference image
-    if model_loader.is_mock or force_mock:
-        # Generate a beautiful gradient image as a mock preview
-        res = 512
-        img = Image.new("RGB", (res, res), (30, 30, 40))
-        draw = ImageDraw.Draw(img)
-        
-        # Draw abstract background gradient based on prompt hash to make it dynamic
-        hue = hash(prompt) % 360
-        # Simple color generation in RGB from hue
-        import colorsys
-        c1 = tuple(int(x * 255) for x in colorsys.hsv_to_rgb(hue / 360.0, 0.6, 0.4))
-        c2 = tuple(int(x * 255) for x in colorsys.hsv_to_rgb(((hue + 180) % 360) / 360.0, 0.6, 0.2))
-        
-        for y in range(res):
-            blend = y / res
-            r = int(c1[0] * (1 - blend) + c2[0] * blend)
-            g = int(c1[1] * (1 - blend) + c2[1] * blend)
-            b = int(c1[2] * (1 - blend) + c2[2] * blend)
-            draw.line([(0, y), (res, y)], fill=(r, g, b))
-            
-        # Draw some circles/shapes
-        draw.ellipse([res//4, res//4, 3*res//4, 3*res//4], outline=(255, 255, 255, 100), width=3)
-        
-        # Write prompt on the image
-        draw.text((20, res - 50), f"PROMPT: {prompt[:40]}...", fill=(255, 255, 255))
-        draw.text((20, 20), "MOCK GENERATION PREVIEW", fill=(255, 255, 200))
-        
-        # Save to buffer
+def generate_ref_image(prompt: str = Query(...), force_mock: bool = Query(False),
+                       method: str = Query("AUTO"), resolution: int = Query(1024, ge=128, le=4096)):
+    try:
+        if force_mock:
+            image, _, _ = generate_procedural_textures(prompt, resolution=resolution)
+            source = "mock"
+        else:
+            image, source = reference_image(prompt, resolution, method)
         buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        buf.seek(0)
-        return StreamingResponse(buf, media_type="image/png")
-    
-    else:
-        # If in real mode, we could trigger a local lightweight Text-to-Image pipeline
-        # or use a free public API endpoint (HuggingFace Inference API etc.)
-        # For maximum robustness in this local server setup, we fall back to the generator
-        # if the real HuggingFace API calls fail or offline.
-        try:
-            import requests
-            # Using a free public stable diffusion API (e.g., Pollinations AI or standard SD)
-            # This is extremely fast, lightweight and works perfectly for reference image previews!
-            logger.info("Fetching image from public Stable Diffusion API...")
-            sanitized_prompt = requests.utils.quote(prompt)
-            api_url = f"https://image.pollinations.ai/p/{sanitized_prompt}?width=512&height=512&seed=42&nologo=true"
-            response = requests.get(api_url, timeout=10)
-            if response.status_code == 200:
-                return Response(content=response.content, media_type="image/jpeg")
-        except Exception as e:
-            logger.warning(f"Failed to fetch from public Text-to-Image API: {e}. Falling back to local gradient generator.")
-            
-        # Fallback to local procedural gradient if offline
-        return generate_ref_image(prompt, force_mock=True)
+        image.save(buf, format="PNG")
+        return Response(buf.getvalue(), media_type="image/png", headers={"X-Reference-Source": source})
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(status_code=502, detail="Falha ao gerar imagem de referência. Selecione uma imagem local ou tente novamente. " + str(error)) from error
 
 @app.post("/texture")
 async def texture_mesh(
     file: UploadFile = File(...),
     prompt: Optional[str] = Form(None),
-    resolution: int = Form(1024),
+    resolution: int = Form(1024, ge=128, le=4096),
     steps: int = Form(20),
     guidance_scale: float = Form(7.5),
     negative_prompt: Optional[str] = Form(""),
-    force_mock: bool = Form(False)
+    force_mock: bool = Form(False),
+    method: str = Form("AUTO"),
+    preserve_uv: bool = Form(False),
+    reference: Optional[UploadFile] = File(None),
+    reference_source: str = Form("uploaded"),
 ):
     """
     Textures an uploaded 3D mesh (OBJ or GLB) based on prompt or uploaded reference image.
@@ -168,65 +127,50 @@ async def texture_mesh(
         buffer.write(await file.read())
         
     try:
-        # Determine if we run in mock mode
-        use_mock = model_loader.is_mock or force_mock
-        
-        # 1. Obtain reference image (either generated from prompt or using prompt to generate mock texture)
+        if method not in {"AUTO", "AI", "PATTERN"}:
+            raise HTTPException(status_code=422, detail="Método de geração inválido.")
+        direct_pattern = method == "PATTERN" or (method == "AUTO" and pattern_kind(prompt or "")
+                           and (reference is None or reference_source == "local-pattern"))
+        use_mock = force_mock
+        if model_loader.is_mock and not force_mock and not direct_pattern:
+            raise HTTPException(status_code=503, detail="O modelo de IA não está carregado. Use padrões locais, inicie o modo real ou ative Mock explicitamente para testes.")
         ref_image = None
-        if prompt and not use_mock:
-            # Let's fetch the reference image using our own helper
+        source = None
+        if reference is not None:
             try:
-                import requests
-                logger.info(f"Generating reference image via API for prompt: '{prompt}'")
-                sanitized_prompt = requests.utils.quote(prompt)
-                api_url = f"https://image.pollinations.ai/p/{sanitized_prompt}?width=512&height=512&seed=42&nologo=true"
-                response = requests.get(api_url, timeout=15)
-                if response.status_code == 200:
-                    ref_image = Image.open(io.BytesIO(response.content)).convert("RGB")
-            except Exception as e:
-                logger.warning(f"Could not generate reference image for AI painter: {e}. Proceeding without image cond.")
-        
-        # 2. Texturing stage
+                ref_image = Image.open(io.BytesIO(await reference.read())).convert("RGB")
+                source = "uploaded"
+            except Exception as error:
+                raise HTTPException(status_code=422, detail="Imagem de referência inválida.") from error
         if use_mock:
-            logger.info("Processing using Mock Generator...")
             mesh_out, albedo, roughness, normal = apply_mock_texture_to_mesh(
-                input_mesh_path, prompt, ref_image=ref_image, resolution=resolution
-            )
+                input_mesh_path, prompt, ref_image=ref_image, resolution=resolution)
+            engine = "mock"
         else:
-            logger.info("Processing using Hunyuan3D-Paint...")
-            # Load mesh in trimesh
             import trimesh
-            mesh_in = trimesh.load(input_mesh_path, force='mesh')
-            
-            # If we don't have a reference image, generate one or raise error
+            mesh_in = trimesh.load(input_mesh_path, force='mesh', process=False)
             if ref_image is None:
-                raise HTTPException(status_code=400, detail="A text prompt is required to generate reference image for the texturing pipeline.")
-            
-            # Call Hunyuan3D-Paint
-            # We pass steps, guidance scale etc as kwargs
-            mesh_out = model_loader.paint_mesh(
-                mesh_in, ref_image, 
-                steps=steps, 
-                guidance_scale=guidance_scale,
-                negative_prompt=negative_prompt
-            )
-            
-            # Extract maps from materials if returned, or we generate default maps for output bundle
-            # Since Hunyuan3D-Paint maps the textures onto the mesh directly, we can export the GLB.
-            # We can also extract the texture image to return in the ZIP.
-            albedo = None
-            if hasattr(mesh_out.visual, 'material') and mesh_out.visual.material is not None:
-                material = mesh_out.visual.material
-                if hasattr(material, 'image') and material.image is not None:
-                    albedo = material.image
-                    
-            if albedo is None:
-                # Fallback to simple image extraction if simple color/texture
-                albedo = Image.new("RGB", (resolution, resolution), (180, 180, 180))
-            
-            # Create default roughness and normals since Hunyuan3D v2.0/v2.1 paint pipeline
-            # primarily outputs Albedo. PBR maps are often generated procedurally or via additional outputs.
-            _, roughness, normal = generate_procedural_textures(prompt, ref_image, resolution)
+                if not prompt or not prompt.strip():
+                    raise HTTPException(status_code=422, detail="Informe um prompt ou selecione uma imagem de referência.")
+                try:
+                    ref_image, source = reference_image(prompt, resolution, "PATTERN" if direct_pattern else "AI")
+                except ValueError as error:
+                    raise HTTPException(status_code=422, detail=str(error)) from error
+                except Exception as error:
+                    raise HTTPException(status_code=502, detail="O serviço de referência falhou. Selecione uma imagem local; nenhuma textura foi gerada. " + str(error)) from error
+            if direct_pattern:
+                albedo = ref_image.resize((resolution, resolution), Image.Resampling.LANCZOS)
+                mesh_out = apply_pattern(mesh_in, albedo, preserve_uv)
+                engine = "local-pattern"
+            else:
+                mesh_out = model_loader.paint_mesh(mesh_in, ref_image, resolution=resolution, preserve_uv=preserve_uv)
+                albedo = extract_albedo(mesh_out)
+                engine = "hunyuan3d"
+            # Paint v2.0 supplies albedo only; don't invent bumps or checkerboard PBR details.
+            roughness, normal = neutral_maps(albedo.width)
+        metadata = {"engine": engine, "reference_source": source, "preserve_uv": preserve_uv,
+                    "resolution": list(albedo.size), "auxiliary_maps": "neutral" if not use_mock else "mock"}
+        logger.info("Texturing result: %s", metadata)
 
         # 3. Export the textured mesh to GLB
         output_glb_bytes = mesh_out.export(file_type="glb")
@@ -234,6 +178,7 @@ async def texture_mesh(
         # 4. Pack everything into a ZIP archive
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            zip_file.writestr("generation.json", json.dumps(metadata))
             # Add textured mesh
             zip_file.writestr("mesh.glb", output_glb_bytes)
             
@@ -259,6 +204,10 @@ async def texture_mesh(
             headers={"Content-Disposition": f"attachment; filename=textured_{temp_id}.zip"}
         )
 
+    except HTTPException:
+        raise
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as e:
         logger.error(f"Error occurred during texturing process: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Texturing failed: {str(e)}")

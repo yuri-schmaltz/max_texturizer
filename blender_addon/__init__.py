@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Max Texturizer IA",
     "author": "Antigravity",
-    "version": (1, 3, 1),
+    "version": (1, 4, 0),
     "blender": (3, 3, 0),
     "location": "View3D > Sidebar > Max Texturizer",
     "description": "Texturização automática de malhas 3D usando inteligência artificial (Hunyuan3D-Paint)",
@@ -21,6 +21,11 @@ from . import operators
 from . import ui
 
 def register():
+    bpy.types.Scene.max_texturizer_method = bpy.props.EnumProperty(
+        name="Geração", items=[('AUTO', 'Automática', 'Padrões locais para xadrez/bolinhas; IA para outras referências'),
+                                ('PATTERN', 'Padrão exato', 'Xadrez e bolinhas nas cores descritas, sem IA'),
+                                ('AI', 'Hunyuan3D', 'Pintura por IA usando uma imagem de referência')], default='AUTO')
+    bpy.types.Scene.max_texturizer_reference_image = bpy.props.PointerProperty(name="Imagem de referência", type=bpy.types.Image)
     # 1. Register properties on the Scene
     bpy.types.Scene.max_texturizer_prompt = bpy.props.StringProperty(
         name="Prompt",
@@ -77,6 +82,8 @@ def register():
     ui.register()
 
 def unregister():
+    del bpy.types.Scene.max_texturizer_method
+    del bpy.types.Scene.max_texturizer_reference_image
     # 1. Clean properties
     del bpy.types.Scene.max_texturizer_prompt
     del bpy.types.Scene.max_texturizer_neg_prompt

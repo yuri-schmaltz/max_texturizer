@@ -1,5 +1,9 @@
 import os
 import logging
+import importlib
+import threading
+from contextlib import nullcontext
+from unittest.mock import patch
 try:
     import torch
 except ImportError:
@@ -13,6 +17,7 @@ class ModelLoader:
         self.device = "cuda" if torch is not None and torch.cuda.is_available() else "cpu"
         self.is_mock = True
         self.load_error = None
+        self._paint_lock = threading.Lock()
 
     def load_models(self, force_mock=False, require_real=False):
         """
@@ -68,9 +73,21 @@ class ModelLoader:
         # The pipeline accepts a trimesh.Trimesh object and a PIL Image
         # Returns a textured trimesh object
         logger.info("Running texture generation on the input mesh...")
-        # Hunyuan3D-2's public paint wrapper accepts only mesh and image.
-        # Sampling parameters belong to its internal diffusion models.
-        return self.paint_pipeline(mesh, image=image)
+        with self._paint_lock:
+            preserve_uv = kwargs.get('preserve_uv', False)
+            if preserve_uv:
+                from texture_utils import validate_preserved_uv
+                validate_preserved_uv(mesh)
+            resolution = kwargs.get('resolution')
+            if resolution is not None:
+                self.paint_pipeline.config.texture_size = resolution
+                self.paint_pipeline.render.set_default_texture_resolution(resolution)
+            # The upstream wrapper always unwraps with xatlas. Skip only that step
+            # for validated UVs, under the same lock protecting its shared renderer.
+            module = importlib.import_module(type(self.paint_pipeline).__module__)
+            uv_context = patch.object(module, 'mesh_uv_wrap', lambda value: value) if preserve_uv else nullcontext()
+            with uv_context:
+                return self.paint_pipeline(mesh, image=image)
 
 # Global model loader instance
 model_loader = ModelLoader()

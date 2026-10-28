@@ -47,6 +47,37 @@ class LoaderTests(unittest.TestCase):
         self.assertTrue(self.loader.is_mock)
         self.assertIsNotNone(self.loader.load_error)
 
+    def test_preserved_uv_skips_only_unwrap_and_restores_it_after_failure(self):
+        wrapper = types.ModuleType('test_paint_wrapper')
+        original_unwrap = lambda mesh: 'changed'
+        wrapper.mesh_uv_wrap = original_unwrap
+        validation = types.SimpleNamespace(validate_preserved_uv=lambda mesh: None)
+
+        class Pipeline:
+            __module__ = 'test_paint_wrapper'
+            fail = False
+            config = types.SimpleNamespace(texture_size=2048)
+            render = types.SimpleNamespace(set_default_texture_resolution=lambda size: None)
+
+            def __call__(self, mesh, image):
+                self.assert_preserved = wrapper.mesh_uv_wrap(mesh) is mesh
+                if self.fail:
+                    raise ValueError('render failed')
+                return mesh
+
+        self.loader.paint_pipeline = Pipeline()
+        self.loader.is_mock = False
+        mesh = object()
+        with patch.dict(sys.modules, {'test_paint_wrapper': wrapper, 'texture_utils': validation}):
+            self.assertIs(self.loader.paint_mesh(mesh, None, preserve_uv=True, resolution=512), mesh)
+            self.assertTrue(self.loader.paint_pipeline.assert_preserved)
+            self.assertEqual(self.loader.paint_pipeline.config.texture_size, 512)
+            self.assertIs(wrapper.mesh_uv_wrap, original_unwrap)
+            self.loader.paint_pipeline.fail = True
+            with self.assertRaisesRegex(ValueError, 'render failed'):
+                self.loader.paint_mesh(mesh, None, preserve_uv=True)
+            self.assertIs(wrapper.mesh_uv_wrap, original_unwrap)
+
     def test_missing_cuda_is_fatal_when_real_required(self):
         with patch.object(self.module, "torch", None):
             with self.assertRaisesRegex(RuntimeError, "CUDA"):
