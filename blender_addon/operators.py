@@ -6,9 +6,50 @@ import uuid
 import os
 import zipfile
 import tempfile
+from .backend_service import service
+
+_auto_start_done = False
+_last_backend_state = None
 
 def get_preferences():
-    return bpy.context.preferences.addons[__package__.split('.')[0]].preferences
+    return bpy.context.preferences.addons[__package__].preferences
+
+
+def start_backend():
+    prefs = get_preferences()
+    directory = bpy.path.abspath(prefs.backend_directory) if prefs.backend_directory else ""
+    service.start(prefs.server_url, directory, prefs.force_mock)
+
+
+def backend_timer():
+    global _auto_start_done, _last_backend_state
+    try:
+        prefs = get_preferences()
+    except KeyError:
+        return 1.0
+    if not _auto_start_done:
+        _auto_start_done = True
+        if prefs.auto_start_backend:
+            start_backend()
+    state = service.snapshot()
+    current = (state["status"], state["message"])
+    if current != _last_backend_state:
+        _last_backend_state = current
+        for window in bpy.context.window_manager.windows:
+            for area in window.screen.areas:
+                if area.type in {'VIEW_3D', 'PREFERENCES'}:
+                    area.tag_redraw()
+    return 0.5
+
+
+def backend_ready(operator):
+    prefs = get_preferences()
+    state = service.snapshot()
+    if prefs.auto_start_backend and (state["status"] != "ready" or state["url"] != prefs.server_url.rstrip('/')):
+        start_backend()
+        operator.report({'INFO'}, "Preparando backend. Aguarde o painel indicar Conectado e tente novamente.")
+        return False
+    return True
 
 def show_message_box(message="", title="Max Texturizer", icon='INFO'):
     def draw(self, context):
@@ -55,36 +96,41 @@ def build_multipart_body(fields, files):
     return body_bytes, f'multipart/form-data; boundary={boundary}'
 
 
+class OBJECT_OT_MaxTexturizerStartBackend(bpy.types.Operator):
+    bl_idname = "object.max_texturizer_start_backend"
+    bl_label = "Iniciar Backend"
+    bl_description = "Conecta ao servidor existente ou inicia o backend local sem bloquear o Blender"
+
+    def execute(self, context):
+        start_backend()
+        self.report({'INFO'}, "Acompanhe a conexão no painel Max Texturizer.")
+        return {'FINISHED'}
+
+
+class OBJECT_OT_MaxTexturizerOpenBackendLog(bpy.types.Operator):
+    bl_idname = "object.max_texturizer_open_backend_log"
+    bl_label = "Abrir log do backend"
+
+    def execute(self, context):
+        if not service.log_path.is_file():
+            self.report({'INFO'}, "Ainda não há log de um backend iniciado pelo add-on.")
+            return {'CANCELLED'}
+        bpy.ops.wm.path_open(filepath=str(service.log_path))
+        return {'FINISHED'}
+
+
 class OBJECT_OT_MaxTexturizerCheckConnection(bpy.types.Operator):
     bl_idname = "object.max_texturizer_check_connection"
     bl_label = "Verificar Conexão"
-    bl_description = "Verifica se o servidor FastAPI local está ativo"
+    bl_description = "Verifica a conexão em segundo plano e inicia o backend se a opção automática estiver ativa"
 
     def execute(self, context):
-        prefs = get_preferences()
-        url = f"{prefs.server_url.rstrip('/')}/health"
-        
-        try:
-            req = urllib.request.Request(url, method="GET")
-            with urllib.request.urlopen(req, timeout=5) as response:
-                data = json.loads(response.read().decode())
-                status = data.get("status", "unknown")
-                device = data.get("device", "unknown")
-                is_mock = data.get("is_mock", True)
-                mode_str = "MODO REAL (Hunyuan3D)" if not is_mock else "MODO MOCK (Procedural)"
-                
-                show_message_box(
-                    message=f"Conectado! Status: {status} | Dispositivo: {device} | {mode_str}",
-                    title="Conexão OK",
-                    icon='CHECKMARK'
-                )
-        except Exception as e:
-            show_message_box(
-                message=f"Erro de conexão com {url}: {e}",
-                title="Erro de Conexão",
-                icon='ERROR'
-            )
-            
+        if get_preferences().auto_start_backend:
+            start_backend()
+        else:
+            # Verification alone must not launch a server when auto-start is disabled.
+            service.check(get_preferences().server_url)
+        self.report({'INFO'}, "Verificando conexão; acompanhe o resultado no painel.")
         return {'FINISHED'}
 
 
@@ -94,6 +140,8 @@ class OBJECT_OT_MaxTexturizerPreview(bpy.types.Operator):
     bl_description = "Gera a imagem de referência a partir do prompt para visualização prévia"
 
     def execute(self, context):
+        if not backend_ready(self):
+            return {'CANCELLED'}
         scene = context.scene
         prompt = scene.max_texturizer_prompt
         
@@ -162,6 +210,8 @@ class OBJECT_OT_MaxTexturizerGenerate(bpy.types.Operator):
     bl_description = "Exporta o objeto ativo, envia para texturizar e atualiza o modelo/materiais"
 
     def execute(self, context):
+        if not backend_ready(self):
+            return {'CANCELLED'}
         active_obj = context.active_object
         
         if not active_obj or active_obj.type != 'MESH':
@@ -402,6 +452,8 @@ class OBJECT_OT_MaxTexturizerOrchestrate(bpy.types.Operator):
     bl_description = "Envia os slots de materiais e o prompt ao LLM local para estruturar e configurar os shaders procedimentais"
 
     def execute(self, context):
+        if not backend_ready(self):
+            return {'CANCELLED'}
         active_obj = context.active_object
         
         if not active_obj or active_obj.type != 'MESH':
@@ -689,12 +741,23 @@ class OBJECT_OT_MaxTexturizerOrchestrate(bpy.types.Operator):
 
 
 def register():
+    global _auto_start_done, _last_backend_state
+    _auto_start_done = False
+    _last_backend_state = None
+    bpy.utils.register_class(OBJECT_OT_MaxTexturizerStartBackend)
+    bpy.utils.register_class(OBJECT_OT_MaxTexturizerOpenBackendLog)
     bpy.utils.register_class(OBJECT_OT_MaxTexturizerCheckConnection)
     bpy.utils.register_class(OBJECT_OT_MaxTexturizerPreview)
     bpy.utils.register_class(OBJECT_OT_MaxTexturizerGenerate)
     bpy.utils.register_class(OBJECT_OT_MaxTexturizerOrchestrate)
+    if not bpy.app.timers.is_registered(backend_timer):
+        bpy.app.timers.register(backend_timer, first_interval=1.0, persistent=True)
 
 def unregister():
+    if bpy.app.timers.is_registered(backend_timer):
+        bpy.app.timers.unregister(backend_timer)
+    bpy.utils.unregister_class(OBJECT_OT_MaxTexturizerStartBackend)
+    bpy.utils.unregister_class(OBJECT_OT_MaxTexturizerOpenBackendLog)
     bpy.utils.unregister_class(OBJECT_OT_MaxTexturizerCheckConnection)
     bpy.utils.unregister_class(OBJECT_OT_MaxTexturizerPreview)
     bpy.utils.unregister_class(OBJECT_OT_MaxTexturizerGenerate)

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Max Texturizer IA",
     "author": "Antigravity",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (3, 3, 0),
     "location": "View3D > Sidebar > Max Texturizer",
     "description": "Texturização automática de malhas 3D usando inteligência artificial (Hunyuan3D-Paint)",

@@ -10,7 +10,7 @@
 1. **Backend FastAPI** — servidor local que gerencia modelos de IA, gera imagens-guia e executa a texturização. Suporta **Modo Mock** (texturas procedurais instantâneas, sem GPU) e **Modo Real** (Hunyuan3D-Paint, requer GPU NVIDIA + CUDA).
 2. **Blender Add-on** — painel na barra lateral (N-Panel) do Blender 3D para configurar parâmetros, exportar o modelo, enviar para o backend e reintegrar o resultado automaticamente.
 
-> **Status atual:** Modo Mock e o orquestrador LLM são funcionais e testados. O Modo Real (Hunyuan3D-Paint) requer configuração manual de CUDA + `hy3dgen` (veja [Modo Real](#-modo-real-com-gpu)).
+> **Status atual:** Modo Mock e o orquestrador LLM são funcionais e testados. O Modo Real (Hunyuan3D-Paint) instala `hy3dgen` e compila suas extensões automaticamente; requer driver NVIDIA, CUDA Toolkit 12.x, Git e compilador C++ (veja abaixo).
 
 ---
 
@@ -45,16 +45,18 @@ O add-on também se integra opcionalmente a um **LLM local** (Ollama, LM Studio 
 
 - **Python 3.9+**
 - **Blender 3.3+**
-- **Para Modo Real:** GPU NVIDIA com CUDA 11.8+ e 8 GB+ VRAM
+- **Para Modo Real:** GPU NVIDIA, driver compatível com CUDA 12.4, CUDA Toolkit 12.x (`nvcc`), Git e compilador C++. A memória necessária varia com a malha; o carregador habilita CPU offload por padrão.
 - **Para Orquestração LLM (opcional):** [Ollama](https://ollama.com) rodando localmente (`ollama serve`) com um modelo instalado (ex: `ollama pull llama3`)
 
 ---
 
 ## 🚀 Instalação e Execução
 
-### 1. Iniciar o Backend
+### 1. Manter o projeto disponível
 
-Na raiz do projeto, execute:
+Mantenha a pasta deste projeto no computador: o add-on usa os scripts e o ambiente Python dessa pasta. Ao ativar o add-on, ele inicia o backend automaticamente em segundo plano.
+
+Para iniciar pelo terminal, opcionalmente execute:
 
 ```bash
 ./run_backend.sh
@@ -63,8 +65,13 @@ Na raiz do projeto, execute:
 O script automaticamente:
 
 1. Cria um ambiente virtual Python em `backend/venv/`
-2. Instala as dependências de `backend/requirements.txt`
-3. Inicia o servidor em `http://127.0.0.1:8009`
+2. Detecta GPU NVIDIA: prepara o modo real quando disponível; usa Mock em máquinas sem GPU
+3. No modo real, instala PyTorch CUDA, as dependências de inferência, `hy3dgen` de uma revisão fixa e compila as duas extensões
+4. Carrega os pesos e inicia o servidor em `http://127.0.0.1:8009`
+
+Use `./run_backend.sh --real` ou `./run_backend.sh --mock` para escolher explicitamente. Se a preparação ou o carregamento do modo real falhar, a inicialização para com o erro, sem trocar automaticamente para Mock. A primeira execução pode demorar e baixar vários GB de dependências e pesos.
+
+Se já houver um Max Texturizer saudável no mesmo endereço e modo, o script informa que ele está disponível e termina sem carregar outro modelo. Se a porta estiver ocupada por outro serviço ou modo, ele avisa antes da instalação. Use `PORT=8010 ./run_backend.sh --real` para iniciar em outra porta e configure a mesma porta no add-on.
 
 Acesse a documentação interativa (Swagger UI):
 👉 [http://127.0.0.1:8009/docs](http://127.0.0.1:8009/docs)
@@ -72,15 +79,26 @@ Acesse a documentação interativa (Swagger UI):
 ### 2. Instalar o Add-on no Blender
 
 ```bash
-# Empacotar a pasta do add-on em um ZIP
-zip -r max_texturizer.zip blender_addon
+# Gerar o ZIP com o caminho do backend desta cópia do projeto
+python3 package_addon.py
 ```
 
 1. Abra o **Blender 3.3+**
 2. Vá em **Edit → Preferences → Add-ons**
 3. Clique em **Install...** e selecione `max_texturizer.zip`
 4. Ative **3D View: Max Texturizer IA**
-5. (Opcional) Expanda as preferências do add-on para ajustar a URL do backend (padrão: `http://127.0.0.1:8009`)
+5. Aguarde o painel indicar **Conectado: Hunyuan3D / CUDA**. O backend é iniciado automaticamente; nenhum terminal precisa ficar aberto.
+6. Nas preferências, mantenha **Iniciar backend automaticamente** ativado e a URL `http://127.0.0.1:8009`. O ZIP já registra a pasta do projeto. Se mover o projeto ou usar outro computador, indique a nova **Pasta do projeto**, que contém `run_backend.sh`, ou gere um novo ZIP.
+
+O painel oferece **Iniciar Backend**, **Verificar Conexão** e **Abrir log do backend**. A instalação das dependências e o carregamento dos pesos acontecem em segundo plano; as ações de geração ficam indisponíveis durante essa preparação. Falhas aparecem no painel e o log fica em `~/.cache/max-texturizer/backend.log`. Um servidor já ativo é reutilizado. O backend continua rodando ao fechar o Blender ou desativar o add-on.
+
+**Blender via Flatpak:** o add-on usa `flatpak-spawn --host` para iniciar o Python e o CUDA do sistema. A instalação Flatpak precisa desta permissão, configurada uma vez no terminal do sistema:
+
+```bash
+flatpak override --user --talk-name=org.freedesktop.Flatpak org.blender.Blender
+```
+
+Reabra o Blender após mudar a permissão. Ela já foi configurada nesta máquina. A inicialização local aceita URLs HTTP de `localhost`, `127.0.0.1` e `::1`; servidores remotos precisam ser iniciados na própria máquina remota.
 
 ---
 
@@ -90,7 +108,7 @@ Abra o painel lateral do Blender com **N** na Viewport 3D e selecione a aba **Ma
 
 ### A. Texturização de Mesh (básico)
 
-1. **Verificar Conexão** — confirma que o add-on alcança o backend. Exibe o modo ativo (Mock/Real) e o dispositivo (CPU/CUDA).
+1. **Verificar Conexão** — verifica o backend em segundo plano e, se a inicialização automática estiver ativa, inicia o servidor caso necessário. O estado aparece no painel.
 2. **Configurar Prompt** — descreva a textura desejada (ex: `madeira rústica de carvalho, veios escuros`). Preencha também o **Prompt Negativo** (ex: `distorcido, baixa resolução`).
 3. **Escolher o Método de Integração:**
    - **Mapear UVs Existentes** *(padrão)* — mantém sua geometria e aplica as texturas geradas diretamente nas UVs do objeto.
@@ -120,20 +138,24 @@ O backend envia a descrição + lista de slots para o LLM, que retorna proprieda
 | **GPU necessária** | ❌ Não | ✅ NVIDIA + CUDA |
 | **Velocidade** | Instantâneo (~100ms) | Minutos por textura |
 | **Qualidade** | Padrões procedurais simples | PBR neural realista |
-| **Ativação** | Automática (sem CUDA) ou `FORCE_MOCK=true` | CUDA + `hy3dgen` instalado |
+| **Ativação** | Sem GPU ou `./run_backend.sh --mock` | Automática com GPU ou `./run_backend.sh --real` |
 
 ### Ativar o Modo Real
 
-1. Instale o PyTorch com suporte CUDA:
+1. Verifique `nvidia-smi`, `nvcc --version`, `git --version` e `g++ --version`. O instalador usa PyTorch 2.6.0/cu124 e torchvision 0.21.0; o Toolkit deve ser da família CUDA 12. Em Ubuntu com CUDA 12.0, instale GCC/G++ 12 (o script os seleciona se disponíveis).
+2. Na raiz **desta cópia do projeto**, execute:
    ```bash
-   pip install torch --index-url https://download.pytorch.org/whl/cu118
+   ./run_backend.sh --real
    ```
-2. Instale o `hy3dgen` (requer compilação — veja o [repositório oficial](https://github.com/Tencent-Hunyuan/Hunyuan3D-2)):
-   ```bash
-   pip install hy3dgen
-   ```
-3. O backend baixará automaticamente os pesos do `tencent/Hunyuan3D-2` do Hugging Face na primeira execução.
-4. Verifique o modo ativo em **Verificar Conexão** no painel do Blender.
+   O script instala a biblioteca do [repositório oficial](https://github.com/Tencent-Hunyuan/Hunyuan3D-2), compila `custom_rasterizer` e `mesh_processor` e verifica os imports no mesmo `backend/venv` usado pelo servidor. As dependências Python são restritas ao caminho de inferência de pintura; demos e geração de geometria não são instaladas.
+3. Aguarde o download dos pesos de `tencent/Hunyuan3D-2` e o carregamento. O servidor só aceita conexões após essa etapa.
+4. Consulte `http://127.0.0.1:8009/health`: o resultado deve conter `"is_mock": false` e `"load_error": null`.
+
+Os fontes ficam em `backend/vendor/` (ignorado pelo Git); as próximas execuções reaproveitam a instalação. Para reinstalar as extensões, remova apenas `backend/vendor/Hunyuan3D-2/.texturizer-installed` e execute novamente.
+
+O wrapper de pintura Hunyuan3D-2 recebe apenas a malha e a imagem. Os controles de steps, guidance e prompt negativo do add-on não são repassados a esse wrapper, que usa a configuração de amostragem do próprio Hunyuan. A geração da imagem de referência ainda depende do serviço externo descrito no roadmap.
+
+O offload para RAM fica ativo por padrão para reduzir o uso de VRAM. Para desativá-lo, use `HUNYUAN3D_CPU_OFFLOAD=false ./run_backend.sh --real`. Para desenvolvimento com recarga automática, use `RELOAD=true` (os pesos serão recarregados a cada alteração).
 
 Para forçar o Modo Mock mesmo com GPU disponível:
 ```bash

@@ -15,6 +15,19 @@ class MaxTexturizerPreferences(bpy.types.AddonPreferences):
         default=False,
     )
 
+    auto_start_backend: bpy.props.BoolProperty(
+        name="Iniciar backend automaticamente",
+        description="Inicia o servidor local em segundo plano ao ativar o add-on",
+        default=True,
+    )
+
+    backend_directory: bpy.props.StringProperty(
+        name="Pasta do projeto",
+        description="Pasta que contém run_backend.sh; deixe vazio para usar o caminho registrado no ZIP",
+        subtype='DIR_PATH',
+        default="",
+    )
+
     llm_url: bpy.props.StringProperty(
         name="Ollama/LM Studio URL",
         description="Endereço da API do LLM local",
@@ -33,6 +46,9 @@ class MaxTexturizerPreferences(bpy.types.AddonPreferences):
         column.label(text="Configurações do Servidor de Imagem/3D:")
         column.prop(self, "server_url")
         column.prop(self, "force_mock")
+        column.prop(self, "auto_start_backend")
+        column.prop(self, "backend_directory")
+        column.operator("object.max_texturizer_start_backend", icon='PLAY')
         
         column.separator()
         column.label(text="Configurações do LLM Local:")

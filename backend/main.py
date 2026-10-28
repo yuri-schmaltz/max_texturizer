@@ -3,6 +3,7 @@ import io
 import zipfile
 import logging
 import uuid
+from contextlib import asynccontextmanager
 from typing import Optional, List
 from fastapi import FastAPI, UploadFile, File, Form, Query, HTTPException
 from fastapi.responses import StreamingResponse, Response
@@ -18,10 +19,19 @@ from model_loader import model_loader
 from mock_generator import apply_mock_texture_to_mesh, generate_procedural_textures
 from llm_orchestrator import llm_orchestrator
 
+@asynccontextmanager
+async def lifespan(app):
+    force_mock = os.getenv("FORCE_MOCK", "false").lower() == "true"
+    require_real = os.getenv("REQUIRE_REAL", "false").lower() == "true"
+    model_loader.load_models(force_mock=force_mock, require_real=require_real)
+    yield
+
+
 app = FastAPI(
     title="Max Texturizer API",
     description="Backend for automatic texturing of 3D meshes using Hunyuan3D-Paint",
-    version="1.1.0"
+    version="1.1.0",
+    lifespan=lifespan,
 )
 
 class OrchestrateRequest(BaseModel):
@@ -29,13 +39,6 @@ class OrchestrateRequest(BaseModel):
     slots: List[str]
     model_url: Optional[str] = "http://localhost:11434"
     model_name: Optional[str] = "llama3"
-
-# Initialize models on startup
-@app.on_event("startup")
-def startup_event():
-    # By default, we attempt to load real models unless forced or no GPU
-    force_mock = os.getenv("FORCE_MOCK", "false").lower() == "true"
-    model_loader.load_models(force_mock=force_mock)
 
 @app.get("/health")
 def health_check():
@@ -46,6 +49,7 @@ def health_check():
         "status": "running",
         "is_mock": model_loader.is_mock,
         "device": model_loader.device,
+        "load_error": model_loader.load_error,
         "mode": "Mock Mode (Procedural)" if model_loader.is_mock else "AI Model Mode (Hunyuan3D-Paint)"
     }
 
@@ -269,4 +273,4 @@ if __name__ == "__main__":
     # Read host/port from environment
     host = os.getenv("HOST", "127.0.0.1")
     port = int(os.getenv("PORT", 8009))
-    uvicorn.run("main:app", host=host, port=port, reload=True)
+    uvicorn.run("main:app", host=host, port=port, reload=os.getenv("RELOAD", "false").lower() == "true")

@@ -1,4 +1,6 @@
 import bpy
+import textwrap
+from .backend_service import service
 
 class VIEW3D_PT_MaxTexturizer(bpy.types.Panel):
     bl_space_type = 'VIEW_3D'
@@ -11,9 +13,19 @@ class VIEW3D_PT_MaxTexturizer(bpy.types.Panel):
         scene = context.scene
 
         # 1. Connection Section
-        row = layout.row()
+        backend = layout.box()
+        backend.label(text="Servidor de IA", icon='NETWORK_DRIVE')
+        state = service.snapshot()
+        icon = 'CHECKMARK' if state["status"] == 'ready' else 'ERROR' if state["status"] == 'error' else 'INFO'
+        for line in textwrap.wrap(state["message"], width=48):
+            backend.label(text=line, icon=icon)
+        row = backend.row()
         row.scale_y = 1.1
+        row.enabled = state["status"] not in {'checking', 'starting'}
+        row.operator("object.max_texturizer_start_backend", icon='PLAY')
+        row = backend.row()
         row.operator("object.max_texturizer_check_connection", icon='WORLD')
+        backend.operator("object.max_texturizer_open_backend_log", icon='TEXT')
 
         layout.separator()
 
@@ -57,6 +69,7 @@ class VIEW3D_PT_MaxTexturizer(bpy.types.Panel):
 
         # 5. Core Actions
         col_actions = layout.column(align=True)
+        col_actions.enabled = state["status"] not in {'checking', 'starting'}
         col_actions.scale_y = 1.2
         col_actions.operator("object.max_texturizer_preview", icon='IMAGE_DATA')
         

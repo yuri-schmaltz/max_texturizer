@@ -29,6 +29,7 @@ temp_cache/
 max_texturizer.zip
 dist/
 build/
+backend/vendor/
 
 # Third-party add-on bundles (reference only — install separately if needed)
 fluent_materializer_*/

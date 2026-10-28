@@ -1,47 +1,50 @@
-#!/bin/bash
-
-# Max Texturizer Backend Service Runner
-# Configura o venv, instala dependências e inicia o FastAPI
-
-set -e
-
-# Navega para o diretório do script
+#!/usr/bin/env bash
+set -euo pipefail
 cd "$(dirname "$0")"
-
-# Se executado da raiz do projeto, entra na pasta backend
-if [ -d "backend" ]; then
-    cd backend
+project_dir="$PWD"
+mode="${TEXTURIZER_MODE:-auto}"
+case "${1:-}" in
+    --real) mode=real ;;
+    --mock) mode=mock ;;
+    '') ;;
+    *) echo "Uso: $0 [--real|--mock]" >&2; exit 2 ;;
+esac
+if [[ "${FORCE_MOCK:-false}" == true ]]; then
+    mode=mock
 fi
-
-echo "=========================================================="
-echo "          INICIALIZANDO MAX TEXTURIZER BACKEND            "
-echo "=========================================================="
-
-# 1. Criar ambiente virtual
-if [ ! -d "venv" ]; then
-    echo "[+] Criando ambiente virtual Python (venv)..."
-    python3 -m venv venv
+if [[ "$mode" == auto ]]; then
+    if command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1; then
+        mode=real
+    else
+        mode=mock
+    fi
 fi
+case "$mode" in real|mock) ;; *) echo 'TEXTURIZER_MODE deve ser auto, real ou mock.' >&2; exit 2 ;; esac
 
-# 2. Ativar ambiente
-echo "[+] Ativando ambiente virtual..."
-source venv/bin/activate
-
-# 3. Instalar pacotes
-echo "[+] Atualizando pip..."
-pip install --upgrade pip
-
-echo "[+] Instalando dependências em requirements.txt..."
-# Nota: Para o modo mock, xatlas, torch e diffusers são instalados normalmente.
-# Se o usuário desejar compilar os módulos CUDA reais do Hunyuan3D-Paint,
-# ele precisará seguir o README.md e ter o CUDA Toolkit instalado.
-pip install -r requirements.txt
-
-# 4. Iniciar uvicorn
-echo "=========================================================="
-echo "[+] Servidor pronto para execução!"
-echo "[*] Rodando em http://127.0.0.1:8009"
-echo "[*] Acesse http://127.0.0.1:8009/docs para Swagger UI"
-echo "=========================================================="
-
-python3 main.py
+echo '=========================================================='
+echo "          MAX TEXTURIZER BACKEND — modo $mode"
+echo '=========================================================='
+if python3 backend/check_port.py "$mode"; then
+    : # The address is free.
+else
+    port_status=$?
+    if [[ "$port_status" == 10 ]]; then
+        exit 0
+    fi
+    exit "$port_status"
+fi
+if [[ ! -x backend/venv/bin/python ]]; then
+    python3 -m venv backend/venv
+fi
+python_bin="$project_dir/backend/venv/bin/python"
+if [[ "$mode" == real ]]; then
+    "$project_dir/install_hunyuan.sh"
+    export REQUIRE_REAL=true FORCE_MOCK=false
+else
+    "$python_bin" -m pip install -r backend/requirements.txt
+    export FORCE_MOCK=true REQUIRE_REAL=false
+fi
+echo "[*] Iniciando em http://${HOST:-127.0.0.1}:${PORT:-8009}"
+echo '[*] No modo real, a primeira inicialização baixa os pesos antes de aceitar conexões.'
+cd backend
+exec "$python_bin" main.py
